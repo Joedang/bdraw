@@ -18,12 +18,13 @@ width=$(( cols - 10 ))
 height=$(( lines - 1 )) # reserve a line for the status 
 KEY_HL=$'\e[1;30;106m'
 RST=$'\e[0m'
-C_DEFAULT=$'\e[35m█'$RST
-C=$C_DEFAULT
 statusLog='status.log'
 saveFile='savedFrame'
 currentStyle=''
 currentChars='LMR' # characters placed by Left, Middle, and Right mouse buttons
+currentFrame='╭─╮││╰─╯' # frame parts (top left, top, top right, left, right, bottom left, bottom, bottom right)
+initialBackground='.' # character that the framebuffer is initially filled with
+C="$initialBackground" # small amount of defensive programming, in case I reference C before setting it :P
 # }}}
 
 # ----- Function definitions ----- {{{
@@ -35,21 +36,13 @@ printStatus() { # {{{
     echo >> "$statusLog"
 } # }}}
 
-drawFrame() { # {{{
+redraw() { # {{{
     clear -x # clear the screen, but don't kill the scrollback buffer
-    #for (( j=1; j<=height; ++j ))
-    #do
-    #    for (( i=1; i<=width; ++i ))
-    #    do
-    #        printf "\e[$j;${i}H%s" "${framebuff[(( i + width*(j-1) ))]}"
-    #    done
-    #done
-    #echo -en '\e[0;0f' # move the cursor to the origin
     echo -en '\e[0;0f' # move the cursor to the origin
     echoDrawing
     echo -en '\e[0;0f' # move the cursor to the origin
+    printStatus 'The framebuffer has been drawn to the terminal.'
 } # }}}
-
 echoFrame() { # {{{
     for (( j=1; j<=height; ++j ))
     do
@@ -61,9 +54,9 @@ echoFrame() { # {{{
     done
 } # }}}
 
-flushInput() {
+flushInput() { # {{{
     while read -rN1 -t 0.0001 trash; do :; done # flush any remaining characters
-}
+} # }}}
 
 readMouse() { # {{{
 # like read, but for a single mouse click
@@ -100,25 +93,34 @@ readMouse() { # {{{
     eval "$5=$x"
     eval "$6=$y"
 } # }}}
-
 button2char() { # {{{
-    charIndex=$(( ${1: 2:1} -1 ))
-    echo ${currentChars: $charIndex:1}
+    charIndex="$(( ${1: 2:1} -1 ))"
+    echo "${currentChars: $charIndex:1}"
 } # }}}
 
 newChars() { # {{{
     printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
     read -rN3 -p 'Enter 3 characters for left-click, middle-click, and right-click: ' currentChars
-    drawFrame
+    redraw
+} # }}}
+changeStyle() { # {{{
+    printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
+    read -rp 'Enter the new default style: ' style
+    currentStyle=$(printf "$style")
+    redraw
+} # }}}
+newFrameChars() { # {{{
+    printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
+    read -rN8 -p 'Enter frame chars (top-left, top, top-right, left, right, bottom-left, bottom, bottom-right): ' currentFrame
+    redraw
 } # }}}
 
 drawPoint() { # {{{
-    x="$1"
-    y="$2"
-    C="$3"
-    # If the current style is non-empty, use it, else use the old style.
+    x="$1"; y="$2"; C="$3";
+    # If the currentStyle is non-empty, use it, else use the old style.
     [[ "$currentStyle" ]] && style="$currentStyle" || style="${colorbuff[(( x +width*(y-1) ))]}"
-    if (( x <= width && y <= height )); then
+    [[ ! "$C" ]] && C="${framebuff[(( x +width*(y-1) ))]}" # If C is empty, use the old character.
+    if (( x <= width && y <= height )); then # I'm wondering if this should be in the functions that call drawPoint instead...
         printf "\e[$y;${x}H%s" "$style$C$RST"
         framebuff[(( x +width*(y-1) ))]="$C"
         colorbuff[(( x +width*(y-1) ))]="$style"
@@ -127,34 +129,33 @@ drawPoint() { # {{{
         sleep 1
     fi
 } # }}}
-
 point() { # {{{
     printStatus 'Click to draw a point.'
     readMouse escape event button modifier x y
     C=$(button2char "$button")
-    #case "$button" in
-    #    MB1)
-    #        [[ -z "$1" ]] && C="▌" || C="$1" # If $1 is empty, use the default (left half block). Else, use $1.
-    #        ;;
-    #    MB2)
-    #        [[ -z "$2" ]] && C="█" || C="$2" 
-    #        ;;
-    #    MB3)
-    #        [[ -z "$3" ]] && C="▐" || C="$3"
-    #        ;;
-    #    REL | *) # button released
-    #        return
-    #        ;;
-    #esac
     drawPoint "$x" "$y" "$C"
 } # }}}
+stylePoint() { #{{{
+    # This is actually redundant, since you could just use `point` with an empty character.
+    printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
+    read -rp 'Enter the new style: ' style
+    literalStyle=$(printf "$style")
+    redraw
+    printStatus 'Click to style a point.'
+    readMouse escape event button modifier x y
+    C=${framebuff[$(( x+width*(y-1) ))]}
+    #drawPoint "$x" "$y" $(printf "$style")$C$RST
+    if (( x <= width && y <= height )); then
+        printf "\e[$y;${x}H%s" "$literalStyle$C$RST"
+        colorbuff[(( x +width*(y-1) ))]="$literalStyle"
+    else
+        printStatus 'Out of bounds!!!'
+        sleep 1
+    fi
+} # }}}
 
-line() { # {{{
-    printStatus 'Click the starting point of the line.'
-    readMouse escape1 event1 button1 modifier1 x1 y1
-    printStatus 'Release at the end point of the line.'
-    readMouse escape2 event2 button2 modifier2 x2 y2
-    C=$(button2char "$button1")
+drawLine() { # {{{ 
+    x1="$1"; y1="$2"; x2="$3"; y2="$4"; C="$5";
     sign_x=$(( 1 -2*(x1 > x2) ))
     sign_y=$(( 1 -2*(y1 > y2) ))
     dx=$(( x2-x1 ))
@@ -174,38 +175,55 @@ line() { # {{{
         done
     fi
 } # }}}
-
-block() { # {{{
-    printStatus 'Click a corner of the box.'
+line() { # {{{
+    printStatus 'Click the starting point of the line.'
     readMouse escape1 event1 button1 modifier1 x1 y1
-    printStatus 'Click the opposing corner.'
+    printStatus 'Release at the end point of the line.'
     readMouse escape2 event2 button2 modifier2 x2 y2
+    C=$(button2char "$button1")
+    drawLine "$x1" "$y1" "$x2" "$y2" "$C" 
+} # }}}
+
+drawBlock() { # {{{
+    x1=$1; y1=$2; x2=$3; y2=$4; C=$5;
     sign_x=$(( 1 -2*(x1 > x2) ))
     sign_y=$(( 1 -2*(y1 > y2) ))
-    C=$(button2char "$button1")
     for (( x=$x1; $(( x*sign_x ))<=$(( x2*sign_x )); x+=$sign_x )); do
         for (( y=$y1; $(( y*sign_y ))<=$(( y2*sign_y )); y+=$sign_y )); do
             drawPoint "$x" "$y" "$C"
         done
     done
 } # }}}
+block() { # {{{
+    printStatus 'Click a corner of the box.'
+    readMouse escape1 event1 button1 modifier1 x1 y1
+    printStatus 'Click the opposing corner.'
+    readMouse escape2 event2 button2 modifier2 x2 y2
+    C=$(button2char "$button1")
+    drawBlock "$x1" "$y1" "$x2" "$y2" "$C"
+} # }}}
 
-stylePoint() { #{{{
-    printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
-    read -rp 'Enter the new style: ' style
-    literalStyle=$(printf "$style")
-    drawFrame
-    printStatus 'Click to style a point.'
-    readMouse escape event button modifier x y
-    C=${framebuff[$(( x+width*(y-1) ))]}
-    #drawPoint "$x" "$y" $(printf "$style")$C$RST
-    if (( x <= width && y <= height )); then
-        printf "\e[$y;${x}H%s" "$literalStyle$C$RST"
-        colorbuff[(( x +width*(y-1) ))]="$literalStyle"
-    else
-        printStatus 'Out of bounds!!!'
-        sleep 1
-    fi
+drawFrame() { # {{{
+    x1=$1; y1=$2; x2=$3; y2=$4; 
+    xmin=$(( x1 -(x2 < x1)*(x1-x2) ))
+    xmax=$(( x1 -(x2 > x1)*(x1-x2) ))
+    ymin=$(( y1 -(y2 < y1)*(y1-y2) ))
+    ymax=$(( y1 -(y2 > y1)*(y1-y2) ))
+    drawLine  "$xmin" "$ymin" "$xmax" "$ymin" ${currentFrame: 1:1} # top
+    drawLine  "$xmin" "$ymin" "$xmin" "$ymax" ${currentFrame: 3:1} # left
+    drawLine  "$xmax" "$ymin" "$xmax" "$ymax" ${currentFrame: 4:1} # right
+    drawLine  "$xmin" "$ymax" "$xmax" "$ymax" ${currentFrame: 6:1} # bottom
+    drawPoint "$xmin" "$ymin"                 ${currentFrame: 0:1} # top left
+    drawPoint "$xmax" "$ymin"                 ${currentFrame: 2:1} # top right
+    drawPoint "$xmin" "$ymax"                 ${currentFrame: 5:1} # bottom left
+    drawPoint "$xmax" "$ymax"                 ${currentFrame: 7:1} # bottom right
+} # }}}
+frame() { # {{{ 
+    printStatus 'Click a corner of the frame.'
+    readMouse escape1 event1 button1 modifier1 x1 y1
+    printStatus 'Un-click the opposing corner.'
+    readMouse escape2 event2 button2 modifier2 x2 y2
+    drawFrame "$x1" "$y1" "$x2" "$y2"
 } # }}}
 
 echoDrawing() { # {{{
@@ -216,13 +234,30 @@ echoDrawing() { # {{{
         echo
     done
 } # }}}
-
-changeStyle() { # {{{
+loadDrawing() { # {{{
     printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
-    read -rp 'Enter the new default style: ' style
-    currentStyle=$(printf "$style")
-    drawFrame
+    read -rN3 -p 'file to load: ' fileName
+    fileContents=$(< $fileName)
+    IFS_old="$IFS"    
+    #framebuff=( )
+    #colorbuff=( )
+    i=0
+    #IFS=$'\035\n'
+    #while read -r cell; do # (assumes no nulls or color resets were used as a style or single character)
+    #    framebuff[$i]=${cell: -1} # the last character in the cell
+    #    colorbuff[$i]=${cell: 0:-1} # everything but the last character
+    #    (( ++i ))
+    ## split on group separators and newlines; mask color resets as group separators
+    #done <<< "${fileContents/$'\e\[0m'/$'\035'}"
+    #IFS=$'\n' fileLines=( $fileContents )
+    #IFS="$IFS_old"
+    nlines=${#fileLines[@]}
+    height=$(( nlines-1 ))
+    width=$(( i/height ))
+    (( width*height != i )) && printStatus "weird dimensions! width: $width height: $height i: $i" && sleep 5
+    redraw
 } # }}}
+
 # }}}
 
 # ----- Execution ----- {{{
@@ -230,7 +265,7 @@ changeStyle() { # {{{
 declare -a framebuff colorbuff
 for (( i=1; i<=width; ++i )); do
     for (( j=1; j<=height; ++j )); do
-        framebuff[(( i + width*(j-1) ))]='-'
+        framebuff[(( i + width*(j-1) ))]="$initialBackground"
     done
 done
 
@@ -238,23 +273,23 @@ echo $(date -Iseconds) >> "$statusLog"
 
 echo -en '\e[0;0f' # move the cursor to the origin
 #printf "\e[?25l" # turn off the cursor
-drawFrame
-printStatus 'Okay, click somewhere...'
+redraw
 
 while :; do
     flushInput
-    printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block c) assign chars to buttons s) style a point S) new default style r) redraw q) quit'
+    printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw q) quit'
     read -rsN1 mode
     case "$mode" in
         l) line ;;
         p) point ;;
         b) block ;;
+        f) frame ;;
+        F) newFrameChars ;;
         c) newChars ;;
         s) stylePoint ;;
         S) changeStyle ;;
         r) 
-            drawFrame 
-            printStatus 'The framebuffer has been drawn to the terminal.'
+            redraw 
             ;;
         q) break ;;
         *) 
