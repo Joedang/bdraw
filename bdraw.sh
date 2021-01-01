@@ -236,25 +236,35 @@ echoDrawing() { # {{{
 } # }}}
 loadDrawing() { # {{{
     printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
-    read -rN3 -p 'file to load: ' fileName
+    read -r -p 'file to load: ' fileName
     fileContents=$(< $fileName)
     IFS_old="$IFS"    
-    #framebuff=( )
-    #colorbuff=( )
-    i=0
-    #IFS=$'\035\n'
-    #while read -r cell; do # (assumes no nulls or color resets were used as a style or single character)
-    #    framebuff[$i]=${cell: -1} # the last character in the cell
-    #    colorbuff[$i]=${cell: 0:-1} # everything but the last character
-    #    (( ++i ))
-    ## split on group separators and newlines; mask color resets as group separators
-    #done <<< "${fileContents/$'\e\[0m'/$'\035'}"
-    #IFS=$'\n' fileLines=( $fileContents )
-    #IFS="$IFS_old"
-    nlines=${#fileLines[@]}
-    height=$(( nlines-1 ))
-    width=$(( i/height ))
-    (( width*height != i )) && printStatus "weird dimensions! width: $width height: $height i: $i" && sleep 5
+    framebuff=() # clear the buffers
+    colorbuff=()
+    i=1
+    height=0
+    declare -i minwidth maxwidth lineWidth
+    IFS=$'\035\n' # split on group separators and newlines
+    # assumpitons: 
+    # - All characters are followed by a color reset (\e[0m delimited).
+    # - No char or style includes a color reset, a contorl char, or a char that isn't single-width (no pathological data).
+    # - All lines have the same number of characters (non-ragged).
+    while read -r -a line; do 
+        (( ++height ))
+        lineWidth=${#line[@]}
+        [[ -z "$minwidth" ]] || (( minwidth > lineWidth )) && minwidth="$lineWidth"
+        (( maxwidth < lineWidth )) && maxwidth="$lineWidth"
+        for (( j=0; j<=$lineWidth; ++j )); do
+            cell=${line[$j]}
+            framebuff[$i]=${cell: -1} # the last character in the cell
+            [[ -n "$cell" ]] && colorbuff[$i]=${cell: 0:-1}
+            (( ++i ))
+        done
+    done <<< "${fileContents//$'\e[0m'/$'\035'}" # mask color resets with group separators
+    IFS="$IFS_old"
+    width=$(( (i-1)/height ))
+    printStatus "width: $width height: $height i: $i minwidth: $minwidth maxwidth: $maxwidth" 
+    read -p ' press enter to continue... ' trash
     redraw
 } # }}}
 
@@ -277,7 +287,7 @@ redraw
 
 while :; do
     flushInput
-    printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw q) quit'
+    printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw L) load drawing q) quit'
     read -rsN1 mode
     case "$mode" in
         l) line ;;
@@ -288,9 +298,8 @@ while :; do
         c) newChars ;;
         s) stylePoint ;;
         S) changeStyle ;;
-        r) 
-            redraw 
-            ;;
+        r) redraw ;;
+        L) loadDrawing ;;
         q) break ;;
         *) 
             printStatus "Unrecognized mode!!! "$(printf '(escaped: %q octal: %o literal: %s)' "$mode" "'$mode" "$mode")
