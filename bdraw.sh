@@ -7,6 +7,8 @@
 # - https://invisible-island.net/xterm/ctlseqs/ctlseqs.pdf
 # Joe Shields, 2020-12-29
 
+# TODO: use cursor position reporting to detect double width characters, etc.
+
 # ----- Parameters ----- {{{
 CLICK_REPORT_ON=$'\e[?1000h' # turn on mouse tracking (see "Mouse tracking" and "Mouse Reporting" in `man console_codes`.)
 CLICK_REPORT_OFF=$'\e[?1000l'
@@ -235,35 +237,81 @@ echoDrawing() { # {{{
     done
 } # }}}
 loadDrawing() { # {{{
-    printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
-    read -r -p 'file to load: ' fileName
-    fileContents=$(< $fileName)
-    IFS_old="$IFS"    
+    if [[ -z "$1" ]]; then
+        printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
+        read -r -p 'file to load: ' fileName
+    else
+        fileName="$1"
+    fi
+    #fileContents=$(< $fileName)
+    fileRaw=$(< $fileName)
     framebuff=() # clear the buffers
     colorbuff=()
-    i=1
-    height=0
-    declare -i minwidth maxwidth lineWidth
-    IFS=$'\035\n' # split on group separators and newlines
-    # assumpitons: 
-    # - All characters are followed by a color reset (\e[0m delimited).
-    # - No char or style includes a color reset, a contorl char, or a char that isn't single-width (no pathological data).
-    # - All lines have the same number of characters (non-ragged).
-    while read -r -a line; do 
-        (( ++height ))
-        lineWidth=${#line[@]}
-        [[ -z "$minwidth" ]] || (( minwidth > lineWidth )) && minwidth="$lineWidth"
-        (( maxwidth < lineWidth )) && maxwidth="$lineWidth"
-        for (( j=0; j<=$lineWidth; ++j )); do
-            cell=${line[$j]}
-            framebuff[$i]=${cell: -1} # the last character in the cell
-            [[ -n "$cell" ]] && colorbuff[$i]=${cell: 0:-1}
-            (( ++i ))
-        done
-    done <<< "${fileContents//$'\e[0m'/$'\035'}" # mask color resets with group separators
-    IFS="$IFS_old"
-    width=$(( (i-1)/height ))
-    printStatus "width: $width height: $height i: $i minwidth: $minwidth maxwidth: $maxwidth" 
+    fileFeed="$fileRaw"
+    #fileFeed="${fileRaw//[\000-\010\013-\032\034-\037]}" # remove problematic control characters (doesn't work)
+    #fileFeed="${fileRaw//[$'\013'-$'\032']}" # remove problematic control characters
+    #fileFeed="${fileRaw//[$'\000'-$'\010\013'-$'\032\034'-$'\037']}" # remove problematic control characters (preserve tabs, newlines and escapes)
+    #fileFeed="${fileFeed//$'\t'/'    '}" # replace tabs with 4 spaces TODO: get the actual tab width of the terminal
+    #fileFeed="${fileFeed/%$'\e'\[0m}" # replace trailing reset (works but misses other trailing styles)
+    # remove trailing styles (matching is done via a conditional expression because parameter expansion doesn't seem to support parenthesized subexpressions)
+    [[ "$fileFeed" =~ ($'\e'\[[^m]*m)*$ ]] && fileFeed="${fileFeed/%$BASH_REMATCH}" # misses a lone trailing reset
+
+    #fileFeed="${fileRaw%.$'\e'\[[^m]*m}" # remove trailing styles
+    #fileFeed="${fileRaw%$'\e'[0m}" # remove trailing reset
+    #fileFeed="${fileRaw%$'\e'[[^m]*m}" # remove trailing style
+    #fileFeed="${fileRaw%($'\e'[[^m]*m)*}" # remove trailing styles (doesn't work: doesn't match any trailing styles)
+    echo -n '' > cells
+    height=1; i=0
+    # TODO: handle ragged images
+    while [[ "$fileFeed" =~ ($'\e'\[[^m]*m)*. ]];do # next up is zero or more color escapes followed by a character
+        ((  ++i ))
+        cell="$BASH_REMATCH"
+        C=${cell: -1} # the last character in the cell
+        [[ ${#cell} -gt 1 ]] && style=${cell: 0:-1}
+        framebuff[$i]="$C"
+        colorbuff[$i]="$style"
+        snipPattern="$BASH_REMATCH"
+        # You can skip this awful escaping if you just put put double quotes around the pattern... :facepalm:
+        #snipPattern=${snipPattern/\\/\\\\} # escape backslashes
+        #snipPattern=${snipPattern//\//\\/} # escape forward slashes (/ has a special meaning in parameter substitution)
+        #snipPattern=${snipPattern//\%/\\%} # escape percent signs
+        #snipPattern=${snipPattern//\#/\\\#} # escape pound signs
+        #snipPattern=${snipPattern//\-/\\-} # escape dashes signs for some reason
+        fileFeed="${fileFeed/"$snipPattern"}" # snip the cell from the head of the string (would this fail if BASH_REMATCH were "/"?)
+        printf 'i: %d cell: %q snipPattern: %q\n' "$i" "$cell" "$snipPattern" >> cells
+        [[ ${cell: -1} == $'\n' ]] && (( ++height )) && (( --i ))
+        #printStatus "style: "$(printf '%q' "$style")" char: $C i: $i height: $height BASH_REMATCH: $BASH_REMATCH$RST"
+        #sleep 0.2
+    done
+    #printStatus "$(printf 'last cell: %q last style: %q last C: %q 2nd-to-last cell: %q' "$cell" "$style" "$C" "$prevCell")"
+    #read -rp ' press enter to continue...'
+    width=$(( i/height ))
+    mismatch=$(( i-width*height ))
+    #IFS_old="$IFS"    
+    #i=1
+    #height=0
+    #declare -i minwidth maxwidth lineWidth
+    #IFS=$'\035\n' # split on group separators and newlines
+    ## assumpitons: 
+    ## - All characters are followed by a color reset (\e[0m delimited).
+    ## - No char or style includes a color reset, a contorl char, or a char that isn't single-width (no pathological data).
+    ## - All lines have the same number of characters (non-ragged).
+    #while read -r -a line; do 
+    #    (( ++height ))
+    #    lineWidth=${#line[@]}
+    #    [[ -z "$minwidth" ]] || (( minwidth > lineWidth )) && minwidth="$lineWidth"
+    #    (( maxwidth < lineWidth )) && maxwidth="$lineWidth"
+    #    for (( j=0; j<=$lineWidth; ++j )); do
+    #        cell=${line[$j]}
+    #        framebuff[$i]=${cell: -1} # the last character in the cell
+    #        [[ -n "$cell" ]] && colorbuff[$i]=${cell: 0:-1}
+    #        (( ++i ))
+    #    done
+    #done <<< "${fileContents//$'\e[0m'/$'\035'}" # mask color resets with group separators
+    #IFS="$IFS_old"
+    #width=$(( (i-1)/height ))
+    echo "mismatch: $mismatch" >> cells
+    printStatus "width: $width height: $height i: $i mismatch: $mismatch" 
     read -p ' press enter to continue... ' trash
     redraw
 } # }}}
@@ -273,11 +321,15 @@ loadDrawing() { # {{{
 # ----- Execution ----- {{{
 # initialize the frame buffer
 declare -a framebuff colorbuff
-for (( i=1; i<=width; ++i )); do
-    for (( j=1; j<=height; ++j )); do
-        framebuff[(( i + width*(j-1) ))]="$initialBackground"
+if [[ -z "$1" ]];then
+    for (( i=1; i<=width; ++i )); do
+        for (( j=1; j<=height; ++j )); do
+            framebuff[(( i + width*(j-1) ))]="$initialBackground"
+        done
     done
-done
+else
+    loadDrawing "$1"
+fi
 
 echo $(date -Iseconds) >> "$statusLog"
 
