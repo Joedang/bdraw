@@ -25,6 +25,7 @@ saveFile='savedFrame'
 currentStyle=''
 currentChars='LMR' # characters placed by Left, Middle, and Right mouse buttons
 currentFrame='╭─╮││╰─╯' # frame parts (top left, top, top right, left, right, bottom left, bottom, bottom right)
+ currentPath='╭↑╮←→╰↓╯' # path parts (top left, up, top right, left, right, bottom left, down, bottom right)
 initialBackground='.' # character that the framebuffer is initially filled with
 C="$initialBackground" # small amount of defensive programming, in case I reference C before setting it :P
 # }}}
@@ -157,7 +158,7 @@ stylePoint() { #{{{
 } # }}}
 
 drawLine() { # {{{ 
-    x1="$1"; y1="$2"; x2="$3"; y2="$4"; C="$5";
+    local x1="$1" y1="$2" x2="$3" y2="$4" C="$5"
     sign_x=$(( 1 -2*(x1 > x2) ))
     sign_y=$(( 1 -2*(y1 > y2) ))
     dx=$(( x2-x1 ))
@@ -211,14 +212,14 @@ drawFrame() { # {{{
     xmax=$(( x1 -(x2 > x1)*(x1-x2) ))
     ymin=$(( y1 -(y2 < y1)*(y1-y2) ))
     ymax=$(( y1 -(y2 > y1)*(y1-y2) ))
-    drawLine  "$xmin" "$ymin" "$xmax" "$ymin" ${currentFrame: 1:1} # top
-    drawLine  "$xmin" "$ymin" "$xmin" "$ymax" ${currentFrame: 3:1} # left
-    drawLine  "$xmax" "$ymin" "$xmax" "$ymax" ${currentFrame: 4:1} # right
-    drawLine  "$xmin" "$ymax" "$xmax" "$ymax" ${currentFrame: 6:1} # bottom
-    drawPoint "$xmin" "$ymin"                 ${currentFrame: 0:1} # top left
-    drawPoint "$xmax" "$ymin"                 ${currentFrame: 2:1} # top right
-    drawPoint "$xmin" "$ymax"                 ${currentFrame: 5:1} # bottom left
-    drawPoint "$xmax" "$ymax"                 ${currentFrame: 7:1} # bottom right
+    drawLine  "$xmin" "$ymin" "$xmax" "$ymin" "${currentFrame: 1:1}" # top
+    drawLine  "$xmin" "$ymin" "$xmin" "$ymax" "${currentFrame: 3:1}" # left
+    drawLine  "$xmax" "$ymin" "$xmax" "$ymax" "${currentFrame: 4:1}" # right
+    drawLine  "$xmin" "$ymax" "$xmax" "$ymax" "${currentFrame: 6:1}" # bottom
+    drawPoint "$xmin" "$ymin"                 "${currentFrame: 0:1}" # top left
+    drawPoint "$xmax" "$ymin"                 "${currentFrame: 2:1}" # top right
+    drawPoint "$xmin" "$ymax"                 "${currentFrame: 5:1}" # bottom left
+    drawPoint "$xmax" "$ymax"                 "${currentFrame: 7:1}" # bottom right
 } # }}}
 frame() { # {{{ 
     printStatus 'Click a corner of the frame.'
@@ -228,6 +229,56 @@ frame() { # {{{
     drawFrame "$x1" "$y1" "$x2" "$y2"
 } # }}}
 
+drawPath() { # {{{
+    local x1="$1" y1="$2" x2="$3" y2="$4"
+    #(( x1 <= x2 && y1 >= y2 )) && direction=NE
+    #(( x1 >  x2 && y1 >= y2 )) && direction=NW
+    #(( x1 <= x2 && y1 <  y2 )) && direction=SE
+    #(( x1 >  x2 && y1 <  y2 )) && direction=SW
+    sign_x=$(( 1 -2*(x1 > x2) ))
+    sign_y=$(( 1 -2*(y1 > y2) ))
+    dx=$(( x2-x1 ))
+    dy=$(( y2-y1 ))
+    dx_abs=$(( dx * sign_x ))
+    dy_abs=$(( dy * sign_y ))
+    parity=$(( sign_x*sign_y ))
+
+    # choose the characters for the stem
+    (( sign_x == 1 )) && CX="${currentPath: 4:1}" || CX="${currentPath: 3:1}"
+    (( sign_y == 1 )) && CY="${currentPath: 6:1}" || CY="${currentPath: 1:1}"
+
+    # choose the character for the corner
+    if (( parity > 0 )); then # even (positive) parity between dx and dy
+        (( dy >=  dx )) && corner="${currentPath: 5:1}"
+        (( dy <   dx )) && corner="${currentPath: 2:1}"
+    else # odd (negative) parity between dx and dy
+        (( dy >= -dx )) && corner="${currentPath: 7:1}"
+        (( dy <  -dx )) && corner="${currentPath: 0:1}"
+    fi
+
+    # determine where the corner is
+    if (( dx_abs <= dy_abs )); then # dy is longer
+        xCorner="$x1"; yCorner="$y2"
+        C1="$CY"; C2="$CX" # draw y first
+    else # dx is longer
+        xCorner="$x2"; yCorner="$y1"
+        C1="$CX"; C2="$CY" # draw x first
+    fi
+    drawLine "$x1"      "$y1"      "$xCorner" "$yCorner" "$C1"
+    drawLine "$xCorner" "$yCorner" "$x2"      "$y2"      "$C2"
+    drawPoint "$xCorner" "$yCorner" "$corner"
+    #printStatus "x1: $x1 y1: $y1 x2: $x2 y2: $y2 dx_abs: $dx_abs dy_abs: $dy_abs CX: $CX CY: $CY"
+    #read -rp ' press enter to continue...'
+
+} # }}}
+path() { # {{{
+    printStatus 'Click the start of the path.'
+    readMouse escape1 event1 button1 modifier1 x1 y1
+    printStatus 'Click the end of the path.'
+    readMouse escape2 event2 button2 modifier2 x2 y2
+    drawPath "$x1" "$y1" "$x2" "$y2"
+} # }}}
+
 echoDrawing() { # {{{
     for (( j=1; j<=height; ++j )); do
         for (( i=1; i<=width; ++i )); do
@@ -235,6 +286,7 @@ echoDrawing() { # {{{
         done
         echo
     done
+    # TODO: don't print unnecessary escape codes
 } # }}}
 loadDrawing() { # {{{
     if [[ -z "$1" ]]; then
@@ -243,23 +295,10 @@ loadDrawing() { # {{{
     else
         fileName="$1"
     fi
-    #fileContents=$(< $fileName)
-    fileRaw=$(< $fileName)
+    fileFeed=$(< "$fileName")
     framebuff=() # clear the buffers
     colorbuff=()
-    fileFeed="$fileRaw"
-    #fileFeed="${fileRaw//[\000-\010\013-\032\034-\037]}" # remove problematic control characters (doesn't work)
-    #fileFeed="${fileRaw//[$'\013'-$'\032']}" # remove problematic control characters
-    #fileFeed="${fileRaw//[$'\000'-$'\010\013'-$'\032\034'-$'\037']}" # remove problematic control characters (preserve tabs, newlines and escapes)
-    #fileFeed="${fileFeed//$'\t'/'    '}" # replace tabs with 4 spaces TODO: get the actual tab width of the terminal
-    #fileFeed="${fileFeed/%$'\e'\[0m}" # replace trailing reset (works but misses other trailing styles)
-    # remove trailing styles (matching is done via a conditional expression because parameter expansion doesn't seem to support parenthesized subexpressions)
-    [[ "$fileFeed" =~ ($'\e'\[[^m]*m)*$ ]] && fileFeed="${fileFeed/%$BASH_REMATCH}" # misses a lone trailing reset
-
-    #fileFeed="${fileRaw%.$'\e'\[[^m]*m}" # remove trailing styles
-    #fileFeed="${fileRaw%$'\e'[0m}" # remove trailing reset
-    #fileFeed="${fileRaw%$'\e'[[^m]*m}" # remove trailing style
-    #fileFeed="${fileRaw%($'\e'[[^m]*m)*}" # remove trailing styles (doesn't work: doesn't match any trailing styles)
+    [[ "$fileFeed" =~ ($'\e'\[[^m]*m)*$ ]] && fileFeed="${fileFeed/%$BASH_REMATCH}" # remove trailing styles
     echo -n '' > cells
     height=1; i=0
     # TODO: handle ragged images
@@ -270,49 +309,17 @@ loadDrawing() { # {{{
         [[ ${#cell} -gt 1 ]] && style=${cell: 0:-1}
         framebuff[$i]="$C"
         colorbuff[$i]="$style"
-        snipPattern="$BASH_REMATCH"
-        # You can skip this awful escaping if you just put put double quotes around the pattern... :facepalm:
-        #snipPattern=${snipPattern/\\/\\\\} # escape backslashes
-        #snipPattern=${snipPattern//\//\\/} # escape forward slashes (/ has a special meaning in parameter substitution)
-        #snipPattern=${snipPattern//\%/\\%} # escape percent signs
-        #snipPattern=${snipPattern//\#/\\\#} # escape pound signs
-        #snipPattern=${snipPattern//\-/\\-} # escape dashes signs for some reason
-        fileFeed="${fileFeed/"$snipPattern"}" # snip the cell from the head of the string (would this fail if BASH_REMATCH were "/"?)
-        printf 'i: %d cell: %q snipPattern: %q\n' "$i" "$cell" "$snipPattern" >> cells
-        [[ ${cell: -1} == $'\n' ]] && (( ++height )) && (( --i ))
-        #printStatus "style: "$(printf '%q' "$style")" char: $C i: $i height: $height BASH_REMATCH: $BASH_REMATCH$RST"
-        #sleep 0.2
+        fileFeed="${fileFeed/"$cell"}" # snip the cell from the head of the string
+        #printf 'i: %d cell: %q snipPattern: %q\n' "$i" "$cell" "$snipPattern" >> cells
+        [[ "$C" == $'\n' ]] && (( ++height )) && (( --i ))
     done
-    #printStatus "$(printf 'last cell: %q last style: %q last C: %q 2nd-to-last cell: %q' "$cell" "$style" "$C" "$prevCell")"
-    #read -rp ' press enter to continue...'
     width=$(( i/height ))
     mismatch=$(( i-width*height ))
-    #IFS_old="$IFS"    
-    #i=1
-    #height=0
-    #declare -i minwidth maxwidth lineWidth
-    #IFS=$'\035\n' # split on group separators and newlines
-    ## assumpitons: 
-    ## - All characters are followed by a color reset (\e[0m delimited).
-    ## - No char or style includes a color reset, a contorl char, or a char that isn't single-width (no pathological data).
-    ## - All lines have the same number of characters (non-ragged).
-    #while read -r -a line; do 
-    #    (( ++height ))
-    #    lineWidth=${#line[@]}
-    #    [[ -z "$minwidth" ]] || (( minwidth > lineWidth )) && minwidth="$lineWidth"
-    #    (( maxwidth < lineWidth )) && maxwidth="$lineWidth"
-    #    for (( j=0; j<=$lineWidth; ++j )); do
-    #        cell=${line[$j]}
-    #        framebuff[$i]=${cell: -1} # the last character in the cell
-    #        [[ -n "$cell" ]] && colorbuff[$i]=${cell: 0:-1}
-    #        (( ++i ))
-    #    done
-    #done <<< "${fileContents//$'\e[0m'/$'\035'}" # mask color resets with group separators
-    #IFS="$IFS_old"
-    #width=$(( (i-1)/height ))
-    echo "mismatch: $mismatch" >> cells
-    printStatus "width: $width height: $height i: $i mismatch: $mismatch" 
-    read -p ' press enter to continue... ' trash
+    (( $mismatch )) \
+        && printStatus "warning: This might be a ragged image! width: $width height: $height i: $i mismatch: $mismatch" \
+        && read -p ' press enter to continue... ' trash
+    # TODO: write a loadRagged function to 
+    #echo "mismatch: $mismatch" >> cells
     redraw
 } # }}}
 
@@ -339,13 +346,14 @@ redraw
 
 while :; do
     flushInput
-    printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw L) load drawing q) quit'
+    printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame P) draw a path F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw L) load drawing q) quit'
     read -rsN1 mode
     case "$mode" in
         l) line ;;
         p) point ;;
         b) block ;;
         f) frame ;;
+        P) path ;;
         F) newFrameChars ;;
         c) newChars ;;
         s) stylePoint ;;
