@@ -2,12 +2,38 @@
 # Draw in the terminal.
 # vim: foldmethod=marker: 
 # useful references:
+# - man console_codes
 # - https://stackoverflow.com/questions/5966903/how-to-get-mousemove-and-mouseclick-in-bash
 # - https://github.com/tinmarino/mouse_xterm/blob/master/mouse.sh
 # - https://invisible-island.net/xterm/ctlseqs/ctlseqs.pdf
 # Joe Shields, 2020-12-29
 
-# TODO: use cursor position reporting to detect double width characters, etc.
+# TODO: 
+# - command mode
+# - command logging
+# - Use \e[1003h to make the cursor follow the mouse.
+# - Make a better UI.
+# - vi-mode cursor movement
+# - repeated command mode
+# - multiple buffers
+#   - create and initialize new buffer (not necessarily the same size as before)
+#   - load file into buffer
+#   - Store each buffer as a string and load it like a file? 
+#       - This is potentially slow for large images, but it's a nice alternative to having a different array for each buffer.
+# - status command to list useful global variables (current*, dimenions, buffers)
+# - copy/paste blocks/buffers
+#   - paste chars only
+#   - paste styles only
+# - undo/redo history on a buffer
+# - draw circle (I'm on the fence about this, since the appearance is so font-dependent.)
+# - bucket fill (fill with char, style, or both) (match using char, style, or both)
+# - Use cursor position reporting to detect double width characters, etc.
+# - Don't output redundant escape sequences when saving (echoing?). 
+#   i.e., "<RED>asdf<RESET>" instead of "<RED>a<RESET><RED>s<RESET><RED>d<RESET><RED>f<RESET>"
+# - man page built from Markdown
+# - help function
+# - option parsing
+# - library mode (Don't do anything interactive, just source the functions.)
 
 # ----- Parameters ----- {{{
 CLICK_REPORT_ON=$'\e[?1000h' # turn on mouse tracking (see "Mouse tracking" and "Mouse Reporting" in `man console_codes`.)
@@ -23,10 +49,10 @@ RST=$'\e[0m'
 statusLog='status.log'
 saveFile='savedFrame'
 currentStyle=''
-currentChars='LMR' # characters placed by Left, Middle, and Right mouse buttons
+currentChars='█ -' # characters placed by Left, Middle, and Right mouse buttons
 currentFrame='╭─╮││╰─╯' # frame parts (top left, top, top right, left, right, bottom left, bottom, bottom right)
  currentPath='╭↑╮←→╰↓╯' # path parts (top left, up, top right, left, right, bottom left, down, bottom right)
-initialBackground='.' # character that the framebuffer is initially filled with
+initialBackground='-' # character that the framebuffer is initially filled with
 C="$initialBackground" # small amount of defensive programming, in case I reference C before setting it :P
 # }}}
 
@@ -156,6 +182,10 @@ stylePoint() { #{{{
         sleep 1
     fi
 } # }}}
+pencilPoints() { # {{{
+    # draw a series of points by clicking and dragging
+    # use \e[1002h
+} # }}}
 
 drawLine() { # {{{ 
     local x1="$1" y1="$2" x2="$3" y2="$4" C="$5"
@@ -204,6 +234,8 @@ block() { # {{{
     readMouse escape2 event2 button2 modifier2 x2 y2
     C=$(button2char "$button1")
     drawBlock "$x1" "$y1" "$x2" "$y2" "$C"
+} # }}}
+styleBlock() { # TODO {{{
 } # }}}
 
 drawFrame() { # {{{
@@ -259,14 +291,14 @@ drawPath() { # {{{
     # determine where the corner is
     if (( dx_abs <= dy_abs )); then # dy is longer
         xCorner="$x1"; yCorner="$y2"
-        C1="$CY"; C2="$CX" # draw y first
+        C1="$CY"; C2="$CX" # move in y first
     else # dx is longer
         xCorner="$x2"; yCorner="$y1"
-        C1="$CX"; C2="$CY" # draw x first
+        C1="$CX"; C2="$CY" # move in x first
     fi
+    drawLine "$xCorner" "$yCorner" "$x2"      "$y2"      "$C2" # draw the segments in reverse order (nicer appearance for no-bend paths)
     drawLine "$x1"      "$y1"      "$xCorner" "$yCorner" "$C1"
-    drawLine "$xCorner" "$yCorner" "$x2"      "$y2"      "$C2"
-    drawPoint "$xCorner" "$yCorner" "$corner"
+    (( dx_abs > 0 && dy_abs > 0 )) && drawPoint "$xCorner" "$yCorner" "$corner"
     #printStatus "x1: $x1 y1: $y1 x2: $x2 y2: $y2 dx_abs: $dx_abs dy_abs: $dy_abs CX: $CX CY: $CY"
     #read -rp ' press enter to continue...'
 
@@ -277,6 +309,34 @@ path() { # {{{
     printStatus 'Click the end of the path.'
     readMouse escape2 event2 button2 modifier2 x2 y2
     drawPath "$x1" "$y1" "$x2" "$y2"
+} # }}}
+
+directInput() { # {{{
+    printStatus 'Click where you want to type.'
+    readMouse escape event button modifier xi yi
+    x="$xi"; y="$yi"; xmax="$xi"
+    printStatus '-- DIRECT INPUT -- Type characters. Press escape to exit.'
+    while :; do
+        echo -en "\e[${y};${x}H" # move the cursor
+        (( x > xmax && (xmax = x) ))
+        C=$'\n'
+        read -rsN1 C
+        printStatus "$(printf 'C: %q' "$C")"
+        case "$C" in
+            $'\e') break ;; # escape
+            $'\n') (( (x = xi) && ++y )) ;;
+            $'\177') # backspace
+                (( --x < xi && (x = xmax) && (--y < yi) && (y = yi) && ( x = xi ) )) # move/wrap back
+                drawPoint "$x" "$y" " "
+                ;;
+            [[:cntrl:]]) printStatus "$(printf 'contrl character ignored: %q' "$C")" ;; # ignore other control characters
+            *)
+                drawPoint "$x" "$y" "$C"
+                (( ++x > width && ( x = xi ) && ++y )) # move over; wrap when you hit the edge of the image
+                echo -en "\e[${y};${x}H" # move the cursor
+                ;;
+        esac
+    done
 } # }}}
 
 echoDrawing() { # {{{
@@ -322,6 +382,11 @@ loadDrawing() { # {{{
     #echo "mismatch: $mismatch" >> cells
     redraw
 } # }}}
+saveDrawing() { # TODO {{{
+} # }}}
+
+runCommand() { # TODO {{{
+} # }}}
 
 # }}}
 
@@ -346,7 +411,7 @@ redraw
 
 while :; do
     flushInput
-    printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame P) draw a path F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw L) load drawing q) quit'
+    printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame P) draw a path i) direct input F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw L) load drawing q) quit'
     read -rsN1 mode
     case "$mode" in
         l) line ;;
@@ -354,6 +419,7 @@ while :; do
         b) block ;;
         f) frame ;;
         P) path ;;
+        i) directInput ;;
         F) newFrameChars ;;
         c) newChars ;;
         s) stylePoint ;;
