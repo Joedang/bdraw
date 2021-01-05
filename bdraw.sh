@@ -8,52 +8,60 @@
 # - https://invisible-island.net/xterm/ctlseqs/ctlseqs.pdf
 # Joe Shields, 2020-12-29
 
-# TODO: 
-# - command mode
-# - command logging
-# - Use \e[1003h to make the cursor follow the mouse.
-# - Make a better UI.
-# - vi-mode cursor movement
-# - repeated command mode
-# - multiple buffers
+# TODO {{{
+# - [X] command mode
+# - [X] command logging
+# - [X] undo/redo history on a buffer
+#   - Keeping a history of drawPoint is probably the most chad solution.
+#   - Trying to do something that tracks user-level operations sounds like a nightmare, and wouldn't be much more efficient.
+# - [X] style picker ("eye dropper tool") ("cloneStyle"?)
+#   - Just copy the style from a clicked location.
+# - [ ] Make a better UI.
+# - [ ] vi-mode cursor movement
+# - [ ] repeated command mode
+# - [ ] multiple buffers
 #   - create and initialize new buffer (not necessarily the same size as before)
 #   - load file into buffer
 #   - Store each buffer as a string and load it like a file? 
 #       - This is potentially slow for large images, but it's a nice alternative to having a different array for each buffer.
-# - status command to list useful global variables (current*, dimenions, buffers)
-# - copy/paste blocks/buffers
+# - [ ] Use \e[1003h to make the cursor follow the mouse.
+# - [ ] status command to list useful global variables (current*, dimenions, buffers)
+# - [ ] copy/paste blocks/buffers
 #   - paste chars only
 #   - paste styles only
-# - undo/redo history on a buffer
-# - draw circle (I'm on the fence about this, since the appearance is so font-dependent.)
-# - bucket fill (fill with char, style, or both) (match using char, style, or both)
-# - Use cursor position reporting to detect double width characters, etc.
-# - Don't output redundant escape sequences when saving (echoing?). 
-#   i.e., "<RED>asdf<RESET>" instead of "<RED>a<RESET><RED>s<RESET><RED>d<RESET><RED>f<RESET>"
-# - man page built from Markdown
-# - help function
-# - option parsing
-# - library mode (Don't do anything interactive, just source the functions.)
+# - [ ] draw circle (I'm on the fence about this, since the appearance is so font-dependent.)
+# - [ ] bucket fill (fill with char, style, or both) (match using char, style, or both)
+# - [ ] Use cursor position reporting to detect double width characters, etc.
+# - [ ] Don't output redundant escape sequences when saving (echoing?). 
+#    i.e., "<RED>asdf<RESET>" instead of "<RED>a<RESET><RED>s<RESET><RED>d<RESET><RED>f<RESET>"
+# - [ ] man page built from Markdown
+# - [ ] help function
+# - [ ] option parsing
+# - [ ] library mode (Don't do anything interactive, just source the functions.)
+# }}}
 
 # ----- Parameters ----- {{{
+# https://i.redd.it/6az49qrpa0b11.jpg
 CLICK_REPORT_ON=$'\e[?1000h' # turn on mouse tracking (see "Mouse tracking" and "Mouse Reporting" in `man console_codes`.)
 CLICK_REPORT_OFF=$'\e[?1000l'
 #cols=$(tput cols)
 #lines=$(tput lines)
-cols=80
-lines=24
+cols=40
+lines=10
 width=$(( cols - 10 ))
 height=$(( lines - 1 )) # reserve a line for the status 
 KEY_HL=$'\e[1;30;106m'
 RST=$'\e[0m'
 statusLog='status.log'
-saveFile='savedFrame'
+historyFile='bdraw.history'
+saveFile='savedFrame.bdraw'
 currentStyle=''
 currentChars='█ -' # characters placed by Left, Middle, and Right mouse buttons
 currentFrame='╭─╮││╰─╯' # frame parts (top left, top, top right, left, right, bottom left, bottom, bottom right)
  currentPath='╭↑╮←→╰↓╯' # path parts (top left, up, top right, left, right, bottom left, down, bottom right)
 initialBackground='-' # character that the framebuffer is initially filled with
-C="$initialBackground" # small amount of defensive programming, in case I reference C before setting it :P
+declare -a drawHist_newChar drawHist_oldChar drawHist_newStyle drawHist_oldStyle drawHist_x drawHist_y # for tracking the history
+declare -i drawHist_ind=0
 # }}}
 
 # ----- Function definitions ----- {{{
@@ -64,12 +72,31 @@ printStatus() { # {{{
     printf "\e[$((height+1));0H%-s" "$*" | tee -a "$statusLog"
     echo >> "$statusLog"
 } # }}}
+drawingInfo() { # {{{
+    clear -x
+    echo -n "- - - - - bdraw - - - - -
+window size (cols x lines):  $cols x $lines
+drawing size (width x height): $width x $height
+statusLog: $statusLog
+historyFile: $historyFile
+currentChars: $currentChars
+currentChars (escaped): ${currentChars@Q}
+currentStyle (escaped): ${currentStyle@Q}
+currentPath: $currentPath
+currentPath (escaped): ${currentPath@Q}
+LANG: $LANG
+LC_ALL: $LC_ALL
+LC_CTYPE: $LC_CTYPE
+"
+read -p "press Enter to continue..."
+redraw
+} # }}}
 
 redraw() { # {{{
     clear -x # clear the screen, but don't kill the scrollback buffer
-    echo -en '\e[0;0f' # move the cursor to the origin
+    echo -en '\e[1;1f' # move the cursor to the origin
     echoDrawing
-    echo -en '\e[0;0f' # move the cursor to the origin
+    echo -en '\e[1;1f' # move the cursor to the origin
     printStatus 'The framebuffer has been drawn to the terminal.'
 } # }}}
 echoFrame() { # {{{
@@ -138,6 +165,12 @@ changeStyle() { # {{{
     currentStyle=$(printf "$style")
     redraw
 } # }}}
+selectStyle() { # {{{ 
+    printStatus 'Click the style you want to copy.'
+    readMouse escape event button modifier x y
+    currentStyle="${colorbuff[(( x +width*(y-1) ))]}"
+    printStatus 'Style copied: '"$(printf '%q' "")"
+} # }}}
 newFrameChars() { # {{{
     printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
     read -rN8 -p 'Enter frame chars (top-left, top, top-right, left, right, bottom-left, bottom, bottom-right): ' currentFrame
@@ -145,14 +178,35 @@ newFrameChars() { # {{{
 } # }}}
 
 drawPoint() { # {{{
-    x="$1"; y="$2"; C="$3";
+    local x="$1"; y="$2"; C="$3"; style="$(printf "$4")"
+    local style oldStyle i
+    position=$(( x +width*(y-1) ))
+    #printStatus "drawing at $x,$y (i=$position)"; sleep 1
+    style="${style:="$currentStyle"}" # if no style was given, fallback to the current style
+    oldStyle=${colorbuff[$position]}
+    style="${style:="$oldStyle"}" # If the style is still empty, fallback to the old style
     # If the currentStyle is non-empty, use it, else use the old style.
-    [[ "$currentStyle" ]] && style="$currentStyle" || style="${colorbuff[(( x +width*(y-1) ))]}"
-    [[ ! "$C" ]] && C="${framebuff[(( x +width*(y-1) ))]}" # If C is empty, use the old character.
+    #[[ "$currentStyle" ]] && style="$currentStyle" || style="${colorbuff[$position]}"
+    [[ ! "$C" ]] && C="${framebuff[$position]}" # If C is empty, use the old character.
     if (( x <= width && y <= height )); then # I'm wondering if this should be in the functions that call drawPoint instead...
         printf "\e[$y;${x}H%s" "$style$C$RST"
-        framebuff[(( x +width*(y-1) ))]="$C"
-        colorbuff[(( x +width*(y-1) ))]="$style"
+        drawHist_oldChar[$drawHist_ind]="${framebuff[$position]}" # hopefully this isn't too slow...
+        drawHist_oldStyle[$drawHist_ind]="${colorbuff[$position]}"
+        drawHist_newChar[$drawHist_ind]="$C"
+        drawHist_newStyle[$drawHist_ind]="$style"
+        #drawHist_pos[$drawHist_ind]="$position"
+        drawHist_x[$drawHist_ind]="$x"
+        drawHist_y[$drawHist_ind]="$y"
+        framebuff[$position]="$C"
+        colorbuff[$position]="$style"
+        (( drawHist_ind++ ))
+        histLen="${#drawHist_x[@]}"
+        if (( drawHist_ind <= histLen ));then
+            for (( i=$drawHist_ind; i<$histLen; ++i));do
+                unset "drawHist_oldChar[$i]" "drawHist_oldStyle[$i]" \
+                      "drawHist_newChar[$i]" "drawHist_newStyle[$i]" "drawHist_x[$i]" "drawHist_y[$i]"
+            done
+        fi
     else
         printStatus 'Out of bounds!!!'
         sleep 1
@@ -173,18 +227,68 @@ stylePoint() { #{{{
     printStatus 'Click to style a point.'
     readMouse escape event button modifier x y
     C=${framebuff[$(( x+width*(y-1) ))]}
-    #drawPoint "$x" "$y" $(printf "$style")$C$RST
-    if (( x <= width && y <= height )); then
-        printf "\e[$y;${x}H%s" "$literalStyle$C$RST"
-        colorbuff[(( x +width*(y-1) ))]="$literalStyle"
-    else
-        printStatus 'Out of bounds!!!'
-        sleep 1
-    fi
+    drawPoint "$x" "$y" "$C" "$style"
+    #if (( x <= width && y <= height )); then
+    #    printf "\e[$y;${x}H%s" "$literalStyle$C$RST"
+    #    colorbuff[(( x +width*(y-1) ))]="$literalStyle"
+    #else
+    #    printStatus 'Out of bounds!!!'
+    #    sleep 1
+    #fi
 } # }}}
-pencilPoints() { # {{{
+pencilPoints() { # TODO {{{
+    :
     # draw a series of points by clicking and dragging
     # use \e[1002h
+} # }}}
+
+undo() { # {{{
+    if (( drawHist_ind > 0 ));then
+        (( drawHist_ind-- ))
+        C="${drawHist_oldChar[$drawHist_ind]}"
+        style="${drawHist_oldStyle[$drawHist_ind]}"
+        x="${drawHist_x[$drawHist_ind]}"
+        y="${drawHist_y[$drawHist_ind]}"
+        position=$(( x +width*(y-1) ))
+        framebuff[$position]="$C"
+        colorbuff[$position]="$style"
+        printf "\e[$y;${x}H%s" "$style$C$RST"
+        #printStatus "ind: $drawHist_ind oldChar: ${drawHist_oldChar[$drawHist_ind]} newChar: ${drawHist_newChar[$drawHist_ind]}"
+        #redraw
+    else
+        printStatus 'already at oldest change'
+    fi
+    echo -en "\e[$lines;1f" # move the cursor to the bottom of the window
+} # }}}
+redo() { # {{{
+    if (( drawHist_ind < ( ${#drawHist_x[@]} ) ));then
+        x="${drawHist_x[$drawHist_ind]}"
+        y="${drawHist_y[$drawHist_ind]}"
+        position=$(( x +width*(y-1) ))
+        C="${drawHist_newChar[$drawHist_ind]}"
+        style="${drawHist_newStyle[$drawHist_ind]}"
+        framebuff[$position]="$C"
+        colorbuff[$position]="$style"
+        printf "\e[$y;${x}H%s" "$style$C$RST"
+        (( drawHist_ind++ ))
+        #redraw
+    else
+        printStatus 'already at latest change'
+    fi
+    echo -en "\e[$lines;1f" # move the cursor to the bottom of the window
+} # }}}
+histInfo() {  # {{{
+    inds=(${!drawHist_oldChar[@]})
+    first=${inds: -10:1}
+    first=${first:=1}
+    printStatus "
+indices:  ${inds[@]: $first:10}
+oldChar:  ${drawHist_oldChar[@]: $first:10}
+newChar:  ${drawHist_newChar[@]: $first:10}
+oldStyle: $(printf '%q' "${drawHist_oldStyle[@]: $first:10}")
+newStyle: $(printf '%q' "${drawHist_newStyle[@]: $first:10}")
+position: ${drawHist_pos[@]: $first:10}
+index:    ${drawHist_ind}"
 } # }}}
 
 drawLine() { # {{{ 
@@ -218,7 +322,7 @@ line() { # {{{
 } # }}}
 
 drawBlock() { # {{{
-    x1=$1; y1=$2; x2=$3; y2=$4; C=$5;
+    local x1="$1"; y1="$2"; x2="$3"; y2="$4"; C="$5";
     sign_x=$(( 1 -2*(x1 > x2) ))
     sign_y=$(( 1 -2*(y1 > y2) ))
     for (( x=$x1; $(( x*sign_x ))<=$(( x2*sign_x )); x+=$sign_x )); do
@@ -236,6 +340,7 @@ block() { # {{{
     drawBlock "$x1" "$y1" "$x2" "$y2" "$C"
 } # }}}
 styleBlock() { # TODO {{{
+    :
 } # }}}
 
 drawFrame() { # {{{
@@ -340,11 +445,13 @@ directInput() { # {{{
 } # }}}
 
 echoDrawing() { # {{{
+    #style_prev=''
     for (( j=1; j<=height; ++j )); do
-        for (( i=1; i<=width; ++i )); do
-            printf "%s" "${colorbuff[(( i + width*(j-1) ))]}${framebuff[(( i + width*(j-1) ))]}$RST"
+        for (( i=1; i<=width; ++i )); do # This is fast, but prints some redundant styles, if they're repeated consecutively.
+            printf "%s" "$RST${colorbuff[(( i + width*(j-1) ))]}${framebuff[(( i + width*(j-1) ))]}"
         done
-        echo
+        (( j == height )) && printf "$RST"
+        echo ''
     done
     # TODO: don't print unnecessary escape codes
 } # }}}
@@ -359,7 +466,7 @@ loadDrawing() { # {{{
     framebuff=() # clear the buffers
     colorbuff=()
     [[ "$fileFeed" =~ ($'\e'\[[^m]*m)*$ ]] && fileFeed="${fileFeed/%$BASH_REMATCH}" # remove trailing styles
-    echo -n '' > cells
+    #echo -n '' > cells
     height=1; i=0
     # TODO: handle ragged images
     while [[ "$fileFeed" =~ ($'\e'\[[^m]*m)*. ]];do # next up is zero or more color escapes followed by a character
@@ -383,9 +490,12 @@ loadDrawing() { # {{{
     redraw
 } # }}}
 saveDrawing() { # TODO {{{
+    printStatus "Saving to \"$saveFile\"..."
+    echoDrawing > "$saveFile"
 } # }}}
 
 runCommand() { # TODO {{{
+    :
 } # }}}
 
 # }}}
@@ -404,37 +514,49 @@ else
 fi
 
 echo $(date -Iseconds) >> "$statusLog"
+echo $(date -Iseconds) >> "$historyFile"
 
-echo -en '\e[0;0f' # move the cursor to the origin
+echo -en '\e[1;1f' # move the cursor to the origin
 #printf "\e[?25l" # turn off the cursor
 redraw
 
 while :; do
+    #printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame P) draw a path i) direct input F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw L) load drawing q) quit'
     flushInput
-    printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame P) draw a path i) direct input F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw L) load drawing q) quit'
-    read -rsN1 mode
-    case "$mode" in
-        l) line ;;
-        p) point ;;
-        b) block ;;
-        f) frame ;;
-        P) path ;;
-        i) directInput ;;
-        F) newFrameChars ;;
-        c) newChars ;;
-        s) stylePoint ;;
-        S) changeStyle ;;
-        r) redraw ;;
-        L) loadDrawing ;;
+    read -rsN1 action
+    case "$action" in
+        l) cmd=line ;;
+        p) cmd=point ;;
+        b) cmd=block ;;
+        f) cmd=frame ;;
+        P) cmd=path ;;
+        i) cmd=directInput ;;
+        F) cmd=newFrameChars ;;
+        c) cmd=newChars ;;
+        s) cmd=stylePoint ;;
+        S) cmd=changeStyle ;;
+        r) cmd=redraw ;;
+        u) cmd=undo ;;
+        R) cmd=redo ;;
+        L) cmd=loadDrawing ;;
+        \?) cmd=drawingInfo ;;
+        :) printStatus ; read -rep ':' cmd ;;
         q) break ;;
         *) 
-            printStatus "Unrecognized mode!!! "$(printf '(escaped: %q octal: %o literal: %s)' "$mode" "'$mode" "$mode")
-            sleep 5
+            printStatus $'\e[31m'"Unrecognized action!!!$RST "$(printf '(escaped: %q octal: %o literal: %s)' "$action" "'$action" "$action")
+            sleep 1
     esac
+    if [[ -n "$cmd" ]];then
+        printStatus "running command: $KEY_HL$cmd$RST"
+        echo "$cmd" >> "$historyFile"
+        eval "$cmd"
+        #read -rp ' press enter to continue...'
+    else
+        printStatus 'no command given!'
+    fi
 done
 echo
-echo "Saving to \"$saveFile\"..."
-echoDrawing > "$saveFile"
+saveDrawing
 echo Done.
 echo -e 'Done.\n' >> "$statusLog"
 #printf "\e[?25h" # turn on the cursor

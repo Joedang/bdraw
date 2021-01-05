@@ -1,0 +1,10 @@
+# log files and default save files
+bdraw.history
+status.log
+savedFrame.bdraw
+savedFrame
+
+# directories
+img
+drawings
+cruft
