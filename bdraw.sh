@@ -58,10 +58,12 @@ saveFile='savedFrame.bdraw'
 currentStyle=''
 currentChars='█ -' # characters placed by Left, Middle, and Right mouse buttons
 currentFrame='╭─╮││╰─╯' # frame parts (top left, top, top right, left, right, bottom left, bottom, bottom right)
- currentPath='╭↑╮←→╰↓╯' # path parts (top left, up, top right, left, right, bottom left, down, bottom right)
+ #currentPath='╭↑╮←→╰↓╯' # path parts (top left, up, top right, left, right, bottom left, down, bottom right)
+ currentPath='╭☝╮☜☞╰☟╯'
 initialBackground='-' # character that the framebuffer is initially filled with
 declare -a drawHist_newChar drawHist_oldChar drawHist_newStyle drawHist_oldStyle drawHist_x drawHist_y # for tracking the history
 declare -i drawHist_ind=0
+libmode='' # whether to do the GUI loop (leave libmode blank) or not (set libmode=true); controlled with the -l flag
 # }}}
 
 # ----- Function definitions ----- {{{
@@ -88,8 +90,8 @@ LANG: $LANG
 LC_ALL: $LC_ALL
 LC_CTYPE: $LC_CTYPE
 "
-read -p "press Enter to continue..."
-redraw
+    read -p "press Enter to continue..."
+    redraw
 } # }}}
 
 redraw() { # {{{
@@ -153,6 +155,10 @@ button2char() { # {{{
     charIndex="$(( ${1: 2:1} -1 ))"
     echo "${currentChars: $charIndex:1}"
 } # }}}
+checkBounds() { # {{{
+    local -i x="$1" y="$2"
+    (( x <= width && y <= height && x > 0 && y > 0))
+} # }}}
 
 newChars() { # {{{
     printf "\e[$((height+1));1H%*s\r" "$cols"  # clear the statusline
@@ -188,8 +194,8 @@ drawPoint() { # {{{
     # If the currentStyle is non-empty, use it, else use the old style.
     #[[ "$currentStyle" ]] && style="$currentStyle" || style="${colorbuff[$position]}"
     [[ ! "$C" ]] && C="${framebuff[$position]}" # If C is empty, use the old character.
-    if (( x <= width && y <= height )); then # I'm wondering if this should be in the functions that call drawPoint instead...
-        printf "\e[$y;${x}H%s" "$style$C$RST"
+    if checkBounds "$x" "$y"; then # I'm wondering if this should be in the functions that call drawPoint instead...
+        [[ -z "$libmode" ]] && printf "\e[$y;${x}H%s" "$style$C$RST"
         drawHist_oldChar[$drawHist_ind]="${framebuff[$position]}" # hopefully this isn't too slow...
         drawHist_oldStyle[$drawHist_ind]="${colorbuff[$position]}"
         drawHist_newChar[$drawHist_ind]="$C"
@@ -208,8 +214,8 @@ drawPoint() { # {{{
             done
         fi
     else
-        printStatus 'Out of bounds!!!'
-        sleep 1
+        printStatus "drawPoint: Out of bounds!!! (x: $x y: $y)"
+        sleep 3
     fi
 } # }}}
 point() { # {{{
@@ -292,7 +298,7 @@ index:    ${drawHist_ind}"
 } # }}}
 
 drawLine() { # {{{ 
-    local x1="$1" y1="$2" x2="$3" y2="$4" C="$5"
+    local x1="$1" y1="$2" x2="$3" y2="$4" C="$5" i len dx dy sign_x sign_y draw_x draw_y
     sign_x=$(( 1 -2*(x1 > x2) ))
     sign_y=$(( 1 -2*(y1 > y2) ))
     dx=$(( x2-x1 ))
@@ -336,8 +342,12 @@ block() { # {{{
     readMouse escape1 event1 button1 modifier1 x1 y1
     printStatus 'Click the opposing corner.'
     readMouse escape2 event2 button2 modifier2 x2 y2
-    C=$(button2char "$button1")
-    drawBlock "$x1" "$y1" "$x2" "$y2" "$C"
+    if checkBounds "$x1" "$y1" && checkBounds "$x2" "$y2";then
+        C=$(button2char "$button1")
+        drawBlock "$x1" "$y1" "$x2" "$y2" "$C"
+    else
+        printStatus "out of bounds!"
+    fi
 } # }}}
 styleBlock() { # TODO {{{
     :
@@ -363,7 +373,11 @@ frame() { # {{{
     readMouse escape1 event1 button1 modifier1 x1 y1
     printStatus 'Un-click the opposing corner.'
     readMouse escape2 event2 button2 modifier2 x2 y2
-    drawFrame "$x1" "$y1" "$x2" "$y2"
+    if checkBounds "$x1" "$y1" && checkBounds "$x2" "$y2";then
+        drawFrame "$x1" "$y1" "$x2" "$y2"
+    else
+        printStatus 'out of bounds!'
+    fi
 } # }}}
 
 drawPath() { # {{{
@@ -413,7 +427,11 @@ path() { # {{{
     readMouse escape1 event1 button1 modifier1 x1 y1
     printStatus 'Click the end of the path.'
     readMouse escape2 event2 button2 modifier2 x2 y2
-    drawPath "$x1" "$y1" "$x2" "$y2"
+    if checkBounds "$x1" "$y1" && checkBounds "$x2" "$y2";then
+        drawPath "$x1" "$y1" "$x2" "$y2"
+    else
+        printStatus 'out of bounds!'
+    fi
 } # }}}
 
 directInput() { # {{{
@@ -493,71 +511,90 @@ saveDrawing() { # TODO {{{
     printStatus "Saving to \"$saveFile\"..."
     echoDrawing > "$saveFile"
 } # }}}
+initializeBuffers() { # {{{
+    local C="$1" i j
+    : "${C:="$initialBackground"}"
+    declare -g -a framebuff=() colorbuff=()
+    for (( i=1; i<=width; ++i )); do
+        for (( j=1; j<=height; ++j )); do
+            framebuff[(( i + width*(j-1) ))]="${C}"
+            colorbuff[(( i + width*(j-1) ))]=''
+        done
+    done
+} # }}}
 
 runCommand() { # TODO {{{
     :
 } # }}}
-
+peckMode() { # {{{
+    while :; do
+        #printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame P) draw a path i) direct input \
+        #F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw L) load drawing \
+        #q) quit'
+        flushInput
+        read -rsN1 action
+        case "$action" in
+            l) cmd=line ;;
+            p) cmd=point ;;
+            b) cmd=block ;;
+            f) cmd=frame ;;
+            P) cmd=path ;;
+            i) cmd=directInput ;;
+            F) cmd=newFrameChars ;;
+            c) cmd=newChars ;;
+            s) cmd=stylePoint ;;
+            S) cmd=changeStyle ;;
+            r) cmd=redraw ;;
+            u) cmd=undo ;;
+            R) cmd=redo ;;
+            L) cmd=loadDrawing ;;
+            \?) cmd=drawingInfo ;;
+            :) printStatus ; read -rep ':' cmd ;;
+            q) break ;;
+            *) 
+                printStatus $'\e[31m'"Unrecognized action!!!$RST \
+                    "$(printf '(escaped: %q octal: %o literal: %s)' "$action" "'$action" "$action")
+                sleep 1
+        esac
+        if [[ -n "$cmd" ]];then
+            printStatus "running command: $KEY_HL$cmd$RST"
+            echo "$cmd" >> "$historyFile"
+            eval "$cmd"
+            #read -rp ' press enter to continue...'
+        else
+            printStatus 'no command given!'
+        fi
+    done
+} # }}}
 # }}}
 
 # ----- Execution ----- {{{
-# initialize the frame buffer
-declare -a framebuff colorbuff
-if [[ -z "$1" ]];then
-    for (( i=1; i<=width; ++i )); do
-        for (( j=1; j<=height; ++j )); do
-            framebuff[(( i + width*(j-1) ))]="$initialBackground"
-        done
-    done
-else
-    loadDrawing "$1"
-fi
+while getopts 'lh' name; do # read option flags
+    case "$name" in
+        b) initialBackground="${OPTARG: 0:1}" ;; # bdraw -b xyz to set the initial background to x
+        l) libmode=true ;;
+        h) echo "TODO: Help text should go here."; exit 1 ;;
+        *) echo "unrecognized option: $name" ;;
+    esac
+done
 
 echo $(date -Iseconds) >> "$statusLog"
 echo $(date -Iseconds) >> "$historyFile"
 
-echo -en '\e[1;1f' # move the cursor to the origin
-#printf "\e[?25l" # turn off the cursor
-redraw
-
-while :; do
-    #printStatus 'Choose a mode: l) draw a line p) draw a point b) draw a block f) draw a frame P) draw a path i) direct input F) assign new frame chars c) assign chars to buttons s) style a point S) new default style r) redraw L) load drawing q) quit'
-    flushInput
-    read -rsN1 action
-    case "$action" in
-        l) cmd=line ;;
-        p) cmd=point ;;
-        b) cmd=block ;;
-        f) cmd=frame ;;
-        P) cmd=path ;;
-        i) cmd=directInput ;;
-        F) cmd=newFrameChars ;;
-        c) cmd=newChars ;;
-        s) cmd=stylePoint ;;
-        S) cmd=changeStyle ;;
-        r) cmd=redraw ;;
-        u) cmd=undo ;;
-        R) cmd=redo ;;
-        L) cmd=loadDrawing ;;
-        \?) cmd=drawingInfo ;;
-        :) printStatus ; read -rep ':' cmd ;;
-        q) break ;;
-        *) 
-            printStatus $'\e[31m'"Unrecognized action!!!$RST "$(printf '(escaped: %q octal: %o literal: %s)' "$action" "'$action" "$action")
-            sleep 1
-    esac
-    if [[ -n "$cmd" ]];then
-        printStatus "running command: $KEY_HL$cmd$RST"
-        echo "$cmd" >> "$historyFile"
-        eval "$cmd"
-        #read -rp ' press enter to continue...'
+if [[ -z "$libmode" ]];then # if not in library mode
+    if [[ -z "$1" ]];then
+        initializeBuffers
     else
-        printStatus 'no command given!'
+        loadDrawing "$1"
     fi
-done
-echo
-saveDrawing
-echo Done.
-echo -e 'Done.\n' >> "$statusLog"
+    echo -en '\e[1;1f' # move the cursor to the origin (necessary?)
+    #printf "\e[?25l" # turn off the cursor
+    redraw
+    peckMode
+    echo
+    saveDrawing
+    echo Done.
+    echo -e 'Done.\n' >> "$statusLog"
+fi
 #printf "\e[?25h" # turn on the cursor
 # }}}
